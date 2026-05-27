@@ -1,0 +1,486 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<title>Mario 64 Style - 3D Platformer</title>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body { overflow:hidden; background:#87CEEB; font-family:'Arial Black',Arial,sans-serif; }
+canvas { display:block; }
+#hud {
+  position:fixed; top:0; left:0; right:0;
+  padding:14px 20px; pointer-events:none;
+  display:flex; justify-content:space-between;
+}
+.hud-box {
+  background:rgba(0,0,0,0.55); border-radius:12px;
+  padding:10px 18px; color:#fff; font-size:19px;
+  text-shadow:1px 1px 3px #000;
+}
+.hud-box b { color:#FFD700; font-size:24px; }
+#tip {
+  position:fixed; bottom:14px; left:50%; transform:translateX(-50%);
+  background:rgba(0,0,0,0.55); color:#fff;
+  padding:7px 18px; border-radius:20px; font-size:13px;
+  pointer-events:none;
+}
+#overlay {
+  position:fixed; inset:0; display:flex;
+  align-items:center; justify-content:center; pointer-events:none;
+}
+#msg {
+  font-size:50px; font-weight:900; color:#FFD700; text-align:center;
+  text-shadow:3px 3px 0 #000,-1px -1px 0 #000; display:none;
+  white-space:pre-line; line-height:1.3;
+}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hud">
+  <div class="hud-box">⭐ Estrellas: <b id="sc">0</b>/8</div>
+  <div class="hud-box">❤️ Vidas: <b id="lc">3</b></div>
+</div>
+<div id="overlay"><div id="msg"></div></div>
+<div id="tip">Clic para capturar ratón | WASD: Mover | Espacio: Saltar (×2) | Ratón: Cámara</div>
+
+<script src="https://cdn.jsdelivr.net/npm/three@0.150.0/build/three.min.js"></script>
+<script>
+// ── RENDERER ──────────────────────────────────────────────────────────────────
+const renderer = new THREE.WebGLRenderer({canvas:document.getElementById('c'),antialias:true});
+renderer.setSize(window.innerWidth,window.innerHeight);
+renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x87CEEB);
+scene.fog = new THREE.Fog(0x87CEEB, 70, 200);
+
+const cam = new THREE.PerspectiveCamera(65, window.innerWidth/window.innerHeight, 0.1, 300);
+
+// ── LIGHTS ───────────────────────────────────────────────────────────────────
+scene.add(new THREE.AmbientLight(0xffffff, 0.5));
+const sun = new THREE.DirectionalLight(0xFFFACC, 1.2);
+sun.position.set(60,100,50);
+sun.castShadow = true;
+sun.shadow.mapSize.set(2048,2048);
+const sc = sun.shadow.camera;
+sc.left=sc.bottom=-90; sc.right=sc.top=90; sc.far=300;
+sun.shadow.bias = -0.001;
+scene.add(sun);
+scene.add(new THREE.HemisphereLight(0xAADDFF, 0x44AA22, 0.4));
+
+// ── PLATFORM DATA ─────────────────────────────────────────────────────────────
+const plats = []; // {minX,maxX,minY,maxY,minZ,maxZ}
+
+function addBox(x,y,z,w,h,d,topC,sideC){
+  sideC = sideC||topC;
+  const mats = [sideC,sideC,topC,sideC,sideC,sideC]
+    .map(c=>new THREE.MeshLambertMaterial({color:c}));
+  const m = new THREE.Mesh(new THREE.BoxGeometry(w,h,d), mats);
+  m.position.set(x,y,z);
+  m.castShadow = true; m.receiveShadow = true;
+  scene.add(m);
+  const pd = {minX:x-w/2,maxX:x+w/2,minY:y-h/2,maxY:y+h/2,minZ:z-d/2,maxZ:z+d/2};
+  plats.push(pd);
+  return pd;
+}
+
+function addTree(x,y,z){
+  const tmat = new THREE.MeshLambertMaterial({color:0x8B4513});
+  const lmat = new THREE.MeshLambertMaterial({color:0x228B22});
+  const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.22,0.3,2,8),tmat);
+  trunk.position.set(x,y+1,z); trunk.castShadow=true; scene.add(trunk);
+  [[2.5,2.0],[3.5,1.5],[4.3,1.1]].forEach(([oy,r])=>{
+    const c = new THREE.Mesh(new THREE.ConeGeometry(r,2,8),lmat);
+    c.position.set(x,y+oy,z); c.castShadow=true; scene.add(c);
+  });
+}
+
+function addCloud(x,y,z){
+  const mat = new THREE.MeshLambertMaterial({color:0xFFFFFF,transparent:true,opacity:0.88});
+  [0,2,-2,1.2,-1.2].forEach((dx,i)=>{
+    const r = 1.3+Math.random()*0.7;
+    const s = new THREE.Mesh(new THREE.SphereGeometry(r,7,5),mat);
+    s.position.set(x+dx*1.8, y+(i===0?0:(Math.random()-0.5)*0.5), z+(Math.random()-0.5)*1.5);
+    scene.add(s);
+  });
+}
+
+// ── WORLD ─────────────────────────────────────────────────────────────────────
+// Main island
+addBox(0,-1,0, 34,2,34, 0x55CC44, 0x7A5C2A);
+// Checkerboard decoration
+for(let i=-3;i<=3;i++) for(let j=-3;j<=3;j++)
+  if((i+j)%2===0){
+    const t=new THREE.Mesh(new THREE.BoxGeometry(1.95,0.06,1.95),
+      new THREE.MeshLambertMaterial({color:0xEEFFCC}));
+    t.position.set(i*2,-0.03,j*2); t.receiveShadow=true; scene.add(t);
+  }
+// Trees on main island
+[-14,-7,0,7,14].forEach(x=>{ addTree(x,0,-15); addTree(x,0,15); });
+addTree(-15,0,0); addTree(15,0,0);
+
+// Path RIGHT ─ rising platforms
+addBox( 20, 1, 0,  8,1,  8, 0x55CC44,0x7A5C2A);
+addBox( 30, 3, 0,  6,1,  6, 0x66BB44,0x7A5C2A);
+addBox( 38, 5, 5,  5,1,  5, 0x77AA44,0x7A5C2A);
+addBox( 38, 7,-5,  5,1,  5, 0x77AA44,0x7A5C2A);
+addBox( 47, 9, 0,  6,1,  6, 0x88AA33,0x7A5C2A);
+
+// Path LEFT ─ sandy platforms
+addBox(-20, 2, 0,  7,1,  7, 0xDDAA55,0x886633);
+addBox(-30, 4, 6,  6,1,  6, 0xCC9944,0x886633);
+addBox(-30, 6,-6,  6,1,  6, 0xCC9944,0x886633);
+addBox(-40, 8, 0,  7,1,  7, 0xBB8833,0x886633);
+
+// Path BACK ─ purple sky islands
+addBox(-16, 5,-18,  7,1,7, 0x9966CC,0x553388);
+addBox( -6, 8,-28,  6,1,6, 0x8855BB,0x553388);
+addBox(  5,11,-34,  5,1,5, 0x7744AA,0x553388);
+addBox( 16,14,-32,  5,1,5, 0x6633AA,0x553388);
+
+// Castle
+addBox(25,16,-28, 12,1,12, 0xDDDDDD,0xAAAAAA); // base
+addBox(25,22,-28, 10,10,10, 0xCCCCCC,0x999999); // tower
+// battlements
+for(let ci=-1;ci<=1;ci+=2) for(let cj=-1;cj<=1;cj+=2)
+  addBox(25+ci*3.5,27.5,-28+cj*3.5, 2.5,2,2.5, 0xCCCCCC,0x999999);
+// door
+const door=new THREE.Mesh(new THREE.BoxGeometry(2,3,0.5),
+  new THREE.MeshLambertMaterial({color:0x8B4513}));
+door.position.set(25,13.8,-23.3); scene.add(door);
+// windows
+[-3,3].forEach(dx=>{
+  const w=new THREE.Mesh(new THREE.BoxGeometry(1.2,1.2,0.5),
+    new THREE.MeshLambertMaterial({color:0x88CCFF}));
+  w.position.set(25+dx,19,-23.3); scene.add(w);
+});
+
+// Water
+const waterMesh=new THREE.Mesh(new THREE.PlaneGeometry(500,500),
+  new THREE.MeshLambertMaterial({color:0x1177CC,transparent:true,opacity:0.75}));
+waterMesh.rotation.x=-Math.PI/2; waterMesh.position.y=-15; scene.add(waterMesh);
+
+// Clouds
+[[-30,26,-50],[0,28,-60],[30,25,-45],[-20,30,-30],[40,24,-20],
+ [-50,27,10],[10,32,0],[-10,29,20]].forEach(([x,y,z])=>addCloud(x,y,z));
+
+// ── MOVING PLATFORMS ─────────────────────────────────────────────────────────
+const movPlats=[];
+function addMovingPlat(x,y,z,w,d,color,axis,range,spd){
+  const m=new THREE.Mesh(new THREE.BoxGeometry(w,0.8,d),
+    new THREE.MeshLambertMaterial({color}));
+  m.castShadow=true; m.receiveShadow=true; scene.add(m);
+  const pd={minX:0,maxX:0,minY:y-0.4,maxY:y+0.4,minZ:0,maxZ:0};
+  plats.push(pd);
+  movPlats.push({m,pd,x,y,z,w,d,axis,range,spd,t:Math.random()*Math.PI*2});
+}
+addMovingPlat(12, 0, 14,  5,5, 0xFF8844,'x', 7, 1.8);
+addMovingPlat(-5, 4,-10,  5,5, 0xFF8844,'z', 6, 1.5);
+addMovingPlat(35, 7,  0,  4,4, 0xFF6622,'y', 3, 2.0);
+
+// ── STARS ─────────────────────────────────────────────────────────────────────
+const starData=[
+  [0,2,0],[20,3,0],[30,5,0],[47,11,0],
+  [-40,10,0],[-16,7,-18],[5,13,-34],[25,28,-28]
+];
+const starObjs=starData.map(([sx,sy,sz])=>{
+  const g=new THREE.Group();
+  const mat=new THREE.MeshLambertMaterial({color:0xFFD700,emissive:0xCC7700,emissiveIntensity:0.5});
+  g.add(new THREE.Mesh(new THREE.OctahedronGeometry(0.5,0),mat));
+  const gl=new THREE.Mesh(new THREE.SphereGeometry(0.75,8,6),
+    new THREE.MeshBasicMaterial({color:0xFFFF44,transparent:true,opacity:0.15}));
+  g.add(gl);
+  g.add(new THREE.PointLight(0xFFDD44,1.5,8));
+  g.position.set(sx,sy,sz);
+  scene.add(g);
+  return {g,ox:sx,oy:sy,oz:sz,collected:false};
+});
+
+// ── PLAYER MESH ───────────────────────────────────────────────────────────────
+const plrGroup=new THREE.Group();
+scene.add(plrGroup);
+(function(){
+  const add=(geo,color,px,py,pz)=>{
+    const m=new THREE.Mesh(geo,new THREE.MeshLambertMaterial({color}));
+    m.position.set(px,py,pz); m.castShadow=true; plrGroup.add(m); return m;
+  };
+  add(new THREE.BoxGeometry(0.75,0.85,0.55),0x1133FF,  0,0.42, 0); // overalls
+  add(new THREE.BoxGeometry(0.70,0.40,0.50),0xCC1111,  0,0.95, 0); // shirt
+  add(new THREE.BoxGeometry(0.25,0.50,0.25),0xCC1111,-0.5,0.85,0); // left arm
+  add(new THREE.BoxGeometry(0.25,0.50,0.25),0xCC1111, 0.5,0.85,0); // right arm
+  add(new THREE.BoxGeometry(0.65,0.65,0.60),0xFFCBA4,  0,1.50, 0); // head
+  add(new THREE.BoxGeometry(0.15,0.12,0.06),0x111111,-0.15,1.56,0.31); // eye L
+  add(new THREE.BoxGeometry(0.15,0.12,0.06),0x111111, 0.15,1.56,0.31); // eye R
+  add(new THREE.BoxGeometry(0.12,0.12,0.12),0xFFAA88,  0,1.42,0.30); // nose
+  add(new THREE.BoxGeometry(0.52,0.10,0.08),0x6B3A2A,  0,1.33,0.30); // mustache
+  add(new THREE.BoxGeometry(0.75,0.28,0.62),0xCC1111,  0,1.90, 0); // cap
+  add(new THREE.BoxGeometry(0.86,0.08,0.38),0xCC1111,  0,1.73,0.28); // brim
+  add(new THREE.BoxGeometry(0.30,0.22,0.52),0x5C3317,-0.20,0.05,0.06); // shoe L
+  add(new THREE.BoxGeometry(0.30,0.22,0.52),0x5C3317, 0.20,0.05,0.06); // shoe R
+})();
+
+const shadowMesh=new THREE.Mesh(new THREE.CircleGeometry(0.6,16),
+  new THREE.MeshBasicMaterial({color:0,transparent:true,opacity:0.35,depthWrite:false}));
+shadowMesh.rotation.x=-Math.PI/2;
+scene.add(shadowMesh);
+
+// ── PHYSICS CONSTANTS ────────────────────────────────────────────────────────
+const PR=0.38, PH=1.95; // player radius, height
+const GRAVITY=28, TERM_VEL=-32, SPEED=12;
+const SUBSTEPS=3;
+
+// ── GAME STATE ────────────────────────────────────────────────────────────────
+const P={
+  pos:new THREE.Vector3(0,5,0),
+  vel:new THREE.Vector3(0,0,0),
+  onGround:false, jumps:0,
+  facing:0, lives:3, stars:0,
+  dead:false, invTimer:0,
+  mode:'play', // play|dead|over|win
+  respTimer:0,
+};
+
+// ── CAMERA ────────────────────────────────────────────────────────────────────
+const camH={h:0,v:0.42,dist:13};
+const mouse={dx:0,dy:0,locked:false};
+
+// ── INPUT ────────────────────────────────────────────────────────────────────
+const K={};
+window.addEventListener('keydown',e=>{
+  K[e.code]=true;
+  if(['Space','ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(e.code))
+    e.preventDefault();
+  if(e.code==='Space' && !P.dead && P.mode==='play'){
+    if(P.jumps<2){
+      P.vel.y = P.jumps===0 ? 11.5 : 14;
+      P.jumps++; P.onGround=false;
+      sfxJump();
+    }
+  }
+  if(e.code==='KeyR' && P.mode==='over') restartGame();
+});
+window.addEventListener('keyup',e=>{ K[e.code]=false; });
+document.getElementById('c').addEventListener('click',()=>
+  document.getElementById('c').requestPointerLock());
+document.addEventListener('pointerlockchange',()=>
+  mouse.locked=document.pointerLockElement===document.getElementById('c'));
+document.addEventListener('mousemove',e=>{
+  if(mouse.locked){ mouse.dx+=e.movementX; mouse.dy+=e.movementY; }
+});
+
+// ── AUDIO ────────────────────────────────────────────────────────────────────
+let aud; try{ aud=new(window.AudioContext||window.webkitAudioContext)(); }catch(e){}
+function note(freq,dur,type='sine',vol=0.25,startFreq=null){
+  if(!aud) return;
+  const o=aud.createOscillator(), g=aud.createGain();
+  o.connect(g); g.connect(aud.destination);
+  o.type=type; o.frequency.value=startFreq||freq;
+  if(startFreq) o.frequency.exponentialRampToValueAtTime(freq,aud.currentTime+dur*0.5);
+  g.gain.setValueAtTime(vol,aud.currentTime);
+  g.gain.exponentialRampToValueAtTime(0.001,aud.currentTime+dur);
+  o.start(); o.stop(aud.currentTime+dur);
+}
+function sfxJump(){ note(800,0.18,'sine',0.22,380); }
+function sfxStar(){ [523,659,784,1047].forEach((f,i)=>setTimeout(()=>note(f,0.22),i*90)); }
+function sfxDeath(){ note(110,0.6,'sawtooth',0.28,440); }
+
+// ── COLLISION ────────────────────────────────────────────────────────────────
+function resolveAll(){
+  let ground=false;
+  for(const p of plats){
+    const pxMin=P.pos.x-PR, pxMax=P.pos.x+PR;
+    const pyMin=P.pos.y,     pyMax=P.pos.y+PH;
+    const pzMin=P.pos.z-PR, pzMax=P.pos.z+PR;
+    if(pxMax<=p.minX||pxMin>=p.maxX) continue;
+    if(pyMax<=p.minY||pyMin>=p.maxY) continue;
+    if(pzMax<=p.minZ||pzMin>=p.maxZ) continue;
+    // penetration depths
+    const dXR=pxMax-p.minX, dXL=p.maxX-pxMin;
+    const dYT=pyMax-p.minY, dYB=p.maxY-pyMin;
+    const dZF=pzMax-p.minZ, dZB=p.maxZ-pzMin;
+    const mn=Math.min(dXR,dXL,dYT,dYB,dZF,dZB);
+    if(mn===dYB && P.vel.y<=0.5){
+      P.pos.y=p.maxY; if(P.vel.y<0) P.vel.y=0; ground=true;
+    } else if(mn===dYT && P.vel.y>0){
+      P.pos.y=p.minY-PH; P.vel.y=-Math.abs(P.vel.y)*0.1;
+    } else if(mn===dXR){ P.pos.x=p.minX-PR; if(P.vel.x>0) P.vel.x=0; }
+      else if(mn===dXL){ P.pos.x=p.maxX+PR; if(P.vel.x<0) P.vel.x=0; }
+      else if(mn===dZF){ P.pos.z=p.minZ-PR; if(P.vel.z>0) P.vel.z=0; }
+      else              { P.pos.z=p.maxZ+PR; if(P.vel.z<0) P.vel.z=0; }
+  }
+  return ground;
+}
+
+// ── HUD & MESSAGES ───────────────────────────────────────────────────────────
+function hud(){ document.getElementById('sc').textContent=P.stars;
+                document.getElementById('lc').textContent=P.lives; }
+let msgTimer=0;
+function showMsg(txt,dur=2.5){
+  const el=document.getElementById('msg');
+  el.innerHTML=txt; el.style.display='block'; msgTimer=dur;
+}
+function hideMsg(){ document.getElementById('msg').style.display='none'; }
+
+function restartGame(){
+  P.pos.set(0,5,0); P.vel.set(0,0,0);
+  P.dead=false; P.lives=3; P.stars=0;
+  P.jumps=0; P.invTimer=2; P.mode='play';
+  starObjs.forEach(s=>{ s.collected=false; s.g.visible=true; });
+  hud(); hideMsg();
+}
+
+// ── MAIN LOOP ────────────────────────────────────────────────────────────────
+const clock=new THREE.Clock();
+let walkT=0;
+
+(function loop(){
+  requestAnimationFrame(loop);
+  const rawDt=clock.getDelta();
+  const dt=Math.min(rawDt,0.05);
+  const t=clock.getElapsedTime();
+
+  // ── camera ──
+  camH.h -= mouse.dx*0.004;
+  camH.v  = Math.max(0.08,Math.min(1.45, camH.v-mouse.dy*0.004));
+  mouse.dx=mouse.dy=0;
+
+  // ── moving platforms ──
+  for(const mp of movPlats){
+    mp.t+=dt*mp.spd;
+    const off=Math.sin(mp.t)*mp.range;
+    let nx=mp.x,ny=mp.y,nz=mp.z;
+    if(mp.axis==='x') nx+=off;
+    if(mp.axis==='y') ny+=off;
+    if(mp.axis==='z') nz+=off;
+    mp.m.position.set(nx,ny,nz);
+    mp.pd.minX=nx-mp.w/2; mp.pd.maxX=nx+mp.w/2;
+    mp.pd.minY=ny-0.4;    mp.pd.maxY=ny+0.4;
+    mp.pd.minZ=nz-mp.d/2; mp.pd.maxZ=nz+mp.d/2;
+  }
+
+  // ── player physics ──
+  if(P.mode==='play' && !P.dead){
+    const mX=(K['KeyD']||K['ArrowRight']?1:0)-(K['KeyA']||K['ArrowLeft']?1:0);
+    const mZ=(K['KeyS']?1:0)-(K['KeyW']||K['ArrowUp']?1:0);
+    if(mX!==0||mZ!==0){
+      const a=camH.h;
+      const dx=mX*Math.cos(a)-mZ*Math.sin(a);
+      const dz=mX*Math.sin(a)+mZ*Math.cos(a);
+      const len=Math.sqrt(dx*dx+dz*dz);
+      P.vel.x+=(dx/len*SPEED-P.vel.x)*Math.min(1,dt*14);
+      P.vel.z+=(dz/len*SPEED-P.vel.z)*Math.min(1,dt*14);
+      P.facing=Math.atan2(dx/len,dz/len);
+      walkT+=dt*8;
+    } else {
+      P.vel.x*=Math.pow(0.15,dt);
+      P.vel.z*=Math.pow(0.15,dt);
+    }
+    P.vel.y=Math.max(TERM_VEL, P.vel.y-GRAVITY*dt);
+
+    // substep integration + collision
+    const sdt=dt/SUBSTEPS;
+    for(let i=0;i<SUBSTEPS;i++){
+      P.pos.x+=P.vel.x*sdt;
+      P.pos.y+=P.vel.y*sdt;
+      P.pos.z+=P.vel.z*sdt;
+      const wasG=P.onGround;
+      P.onGround=resolveAll();
+      if(P.onGround&&!wasG) P.jumps=0;
+    }
+
+    if(P.pos.y<-13){
+      P.dead=true; P.lives--;
+      sfxDeath(); hud();
+      if(P.lives<=0){ P.mode='over'; showMsg('GAME OVER\n\nPresiona R para reiniciar',9999); }
+      else { P.mode='dead'; P.respTimer=2.5; showMsg(`❌ ¡Caíste!\nVidas: ${P.lives}`,2); }
+    }
+    if(P.invTimer>0) P.invTimer-=dt;
+  }
+
+  if(P.mode==='dead'){
+    P.respTimer-=dt;
+    if(P.respTimer<=0){
+      P.pos.set(0,5,0); P.vel.set(0,0,0);
+      P.dead=false; P.jumps=0; P.invTimer=2.5; P.mode='play';
+    }
+  }
+
+  if(msgTimer>0){ msgTimer-=dt; if(msgTimer<=0) hideMsg(); }
+
+  // ── stars ──
+  for(const s of starObjs){
+    if(!s.collected){
+      s.g.rotation.y+=dt*2.5;
+      s.g.position.y=s.oy+Math.sin(t*2+s.ox*0.4)*0.3;
+      const dx=P.pos.x-s.ox, dy=(P.pos.y+1)-s.oy, dz=P.pos.z-s.oz;
+      if(dx*dx+dy*dy+dz*dz<4){
+        s.collected=true; s.g.visible=false;
+        P.stars++; sfxStar(); hud();
+        if(P.stars>=8){ P.mode='win'; showMsg('🎉 ¡GANASTE!\nTodas las estrellas conseguidas!',9999); }
+        else showMsg(`⭐ ¡Estrella! (${P.stars}/8)`,2);
+      }
+    }
+  }
+
+  // ── player visual ──
+  plrGroup.position.copy(P.pos);
+  plrGroup.rotation.y=P.facing;
+  const moving=Math.abs(P.vel.x)>1||Math.abs(P.vel.z)>1;
+  if(P.onGround&&moving){
+    plrGroup.position.y+=Math.abs(Math.sin(walkT))*0.07;
+    plrGroup.children[2].rotation.x= Math.sin(walkT)*0.55; // L arm
+    plrGroup.children[3].rotation.x=-Math.sin(walkT)*0.55; // R arm
+  } else {
+    plrGroup.children[2].rotation.x=0;
+    plrGroup.children[3].rotation.x=0;
+  }
+  if(!P.onGround){
+    const sy=1+P.vel.y*0.012;
+    plrGroup.scale.y=sy;
+    const sr=1/Math.max(0.5,Math.sqrt(Math.abs(sy)));
+    plrGroup.scale.x=plrGroup.scale.z=sr;
+  } else {
+    plrGroup.scale.set(1,1,1);
+  }
+  plrGroup.visible = P.invTimer<=0 || (Math.sin(t*18)>0);
+
+  // ── shadow ──
+  let bestY=-16;
+  for(const p of plats){
+    if(P.pos.x+PR>p.minX&&P.pos.x-PR<p.maxX&&
+       P.pos.z+PR>p.minZ&&P.pos.z-PR<p.maxZ&&
+       p.maxY<=P.pos.y+0.1) bestY=Math.max(bestY,p.maxY);
+  }
+  shadowMesh.position.set(P.pos.x,bestY+0.02,P.pos.z);
+  const sd=P.pos.y-bestY, sc2=Math.max(0.05,1-sd*0.045);
+  shadowMesh.scale.set(sc2,sc2,sc2);
+  shadowMesh.material.opacity=Math.max(0,0.38-sd*0.022);
+
+  // ── camera ──
+  const cr=camH.dist, ch=camH.h, cv=camH.v;
+  cam.position.set(
+    P.pos.x+cr*Math.sin(ch)*Math.cos(cv),
+    P.pos.y+2+cr*Math.sin(cv),
+    P.pos.z+cr*Math.cos(ch)*Math.cos(cv)
+  );
+  cam.lookAt(P.pos.x, P.pos.y+1, P.pos.z);
+
+  // ── water shimmer ──
+  waterMesh.position.y=-15+Math.sin(t*0.4)*0.12;
+
+  renderer.render(scene,cam);
+})();
+
+window.addEventListener('resize',()=>{
+  cam.aspect=window.innerWidth/window.innerHeight;
+  cam.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth,window.innerHeight);
+});
+
+hud();
+</script>
+</body>
+</html>
